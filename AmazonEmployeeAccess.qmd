@@ -1,0 +1,87 @@
+---
+title: "AmazonEmployeeAccess"
+format: html
+editor: visual
+---
+
+## Reading in Amazon data and load packages
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(vroom)
+library(patchwork)
+amazonTrain <- vroom("~/Downloads/AmazonEmployeeAccess/amazon-employee-access-challenge/train.csv") %>%
+  mutate(across(where(is.numeric), factor))
+```
+
+## Exploratory Plots
+
+```{r}
+stacked_bp <- ggplot(amazonTrain, aes(x = ACTION, fill = ROLE_FAMILY)) +
+  geom_bar(position = "stack") +  # side-by-side
+  labs(title = "Counts by ACTION and ROLE_FAMILY", x = "ACTION", y = "ROLE_FAMILY") +
+  theme_minimal()
+
+proportion_bp <- ggplot(amazonTrain, aes(x = ACTION, fill = ROLE_FAMILY)) +
+  geom_bar(position = "fill") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Proportion of ROLE_FAMILY within ACTION", y = "Percentage") +
+  theme_minimal()
+
+
+```
+
+## Creating Recipe
+
+```{r}
+library(tidymodels)
+library(vroom)
+library(embed)
+
+amazonTrain <- vroom("~/Downloads/AmazonEmployeeAccess/amazon-employee-access-challenge/train.csv")
+amazonTest <- vroom("~/Downloads/AmazonEmployeeAccess/amazon-employee-access-challenge/test.csv")
+my_recipe <- recipe(ACTION ~ ., data = amazonTrain) %>%
+  step_mutate(across(everything(), as.factor)) %>%
+  step_other(all_nominal_predictors(), threshold = 0.001) %>%
+  step_dummy(all_nominal_predictors())
+
+prep_recipe <- prep(my_recipe, training = amazonTrain)
+baked_data <- bake(prep_recipe, new_data = amazonTrain)
+cat("Number of columns in baked dataset:", ncol(baked_data), "\n")
+```
+
+
+## Logistic Regression
+
+```{r}
+library(tidymodels)
+submission_ex <- vroom("~/Downloads/AmazonEmployeeAccess/amazon-employee-access-challenge/sampleSubmission.csv")
+
+#Define Model
+logRegModel <- logistic_reg() %>%
+  set_engine("glm")
+
+#Create workflow and fit
+logReg_workflow <- workflow() %>%
+  add_recipe(my_recipe) %>%
+  add_model(logRegModel) %>%
+  fit(data=amazonTrain)
+
+#Make Predictions
+amazon_predictions <- predict(logReg_workflow, new_data = amazonTest, type = "class")
+
+#Prepare for Kaggle
+amazon_results <- amazonTest %>%
+  bind_cols(amazon_predictions)
+
+kaggle_submission_amazon <- amazon_results %>%
+  select(id, .pred_class) %>%
+  rename(ACTION=.pred_class) %>%
+    mutate(ACTION=as.numeric(format(ACTION))) 
+
+
+vroom_write(x=kaggle_submission_amazon, file="./LogisticRegression1.csv", delim=",")
+
+```
+
