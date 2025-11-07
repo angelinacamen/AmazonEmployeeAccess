@@ -1,8 +1,66 @@
+
+  ## Reading in Amazon data and load packages
+  
+
+library(tidyverse)
+library(tidymodels)
+library(vroom)
+library(patchwork)
+amazonTrain <- vroom("~/Downloads/AmazonEmployeeAccess/amazon-employee-access-challenge/train.csv") %>%
+  mutate(across(where(is.numeric), factor))
+
+
+## Exploratory Plots
+
+
+stacked_bp <- ggplot(amazonTrain, aes(x = ACTION, fill = ROLE_FAMILY)) +
+  geom_bar(position = "stack") +  # side-by-side
+  labs(title = "Counts by ACTION and ROLE_FAMILY", x = "ACTION", y = "ROLE_FAMILY") +
+  theme_minimal()
+
+proportion_bp <- ggplot(amazonTrain, aes(x = ACTION, fill = ROLE_FAMILY)) +
+  geom_bar(position = "fill") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "Proportion of ROLE_FAMILY within ACTION", y = "Percentage") +
+  theme_minimal()
+
+
+
+
+## Creating Recipe
+
+
+library(tidymodels)
+library(vroom)
+library(embed)
+
+amazonTrain <- vroom("~/Downloads/AmazonEmployeeAccess/amazon-employee-access-challenge/train.csv")
+amazonTest <- vroom("~/Downloads/AmazonEmployeeAccess/amazon-employee-access-challenge/test.csv")
+my_recipe <- recipe(ACTION ~ ., data = amazonTrain) %>%
+  step_mutate(across(everything(), as.factor)) %>%
+  step_other(all_nominal_predictors(), threshold = 0.001) %>%
+  step_dummy(all_nominal_predictors())
+
+prep_recipe <- prep(my_recipe, training = amazonTrain)
+baked_data <- bake(prep_recipe, new_data = amazonTrain)
+cat("Number of columns in baked dataset:", ncol(baked_data), "\n")
+
+
 ## Logistic Regression
 
 
 library(tidymodels)
 submission_ex <- vroom("~/Downloads/AmazonEmployeeAccess/amazon-employee-access-challenge/sampleSubmission.csv")
+
+my_recipe <- recipe(ACTION ~ ., data = amazonTrain) %>%
+  step_mutate(across(everything(), as.factor)) %>%
+  step_other(all_nominal_predictors(), threshold = 0.001) %>%
+  step_lencode_mixed(all_nominal_predictors(), outcome = "ACTION") %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_range(all_numeric_predictors(), min=0, max=1) %>% #scale to [0,1] 
+  step_pca(all_predictors(), threshold=0.8) #Threshold is between 0 and 1
+
+
 
 #Define Model
 logRegModel <- logistic_reg() %>%
@@ -16,7 +74,6 @@ logReg_workflow <- workflow() %>%
 
 #Make Predictions
 amazon_predictions <- predict(logReg_workflow, new_data = amazonTest, type = "prob")
-#amazon_predictions <- predict(logReg_workflow, new_data = amazonTest, type = "class")
 
 
 #Prepare for Kaggle
@@ -26,11 +83,10 @@ amazon_results <- amazonTest %>%
 kaggle_submission_amazon <- amazon_results %>%
   select(id, .pred_1) %>%
   rename(ACTION=.pred_1) %>%
-  #rename(ACTION=.pred_class)
   mutate(ACTION=as.numeric(format(ACTION))) 
 
 
-vroom_write(x=kaggle_submission_amazon, file="./LogisticRegression2.csv", delim=",")
+vroom_write(x=kaggle_submission_amazon, file="./LogisticRegression3.csv", delim=",")
 
 
 
@@ -40,10 +96,23 @@ vroom_write(x=kaggle_submission_amazon, file="./LogisticRegression2.csv", delim=
 library(embed)
 library(tidymodels)
 
+
 my_recipe <- recipe(ACTION ~ ., data = amazonTrain) %>%
   step_mutate(across(everything(), as.factor)) %>%
   step_other(all_nominal_predictors(), threshold = 0.001) %>%
-  step_lencode_mixed(all_nominal_predictors(), outcome = "ACTION")
+  step_lencode_mixed(all_nominal_predictors(), outcome = "ACTION") %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_range(all_numeric_predictors(), min=0, max=1) %>% #scale to [0,1] 
+  step_pca(all_predictors(), threshold=0.8) #Threshold is between 0 and 1
+
+my_recipe <- recipe(ACTION ~ ., data = amazonTrain) %>%
+  # Keep ACTION as factor
+  step_mutate(across(where(is.character), as.factor)) %>%
+  step_other(all_nominal_predictors(), threshold = 0.001) %>%
+  step_lencode_mixed(all_nominal_predictors(), outcome = "ACTION") %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_pca(all_numeric_predictors(), threshold = 0.8)
+
 
 my_mod <- logistic_reg(mixture=tune(), penalty=tune()) %>% #Type of model
   set_engine("glmnet")
@@ -66,6 +135,7 @@ CV_results <- amazon_workflow %>%
             grid=tuning_grid,
             metrics=metric_set(roc_auc)) #Or leave metrics NULL
 
+
 ## Find Best Tuning Parameters
 bestTune <- tune::select_best(CV_results, metric = "roc_auc")
 
@@ -77,7 +147,233 @@ final_wf <-
 
 ## Predict
 amazon_predictions <- final_wf %>%
-  predict(new_data = amazonTest, type="class")
+  predict(new_data = amazonTest, type="prob")
+
+amazon_results <- amazonTest %>%
+  bind_cols(amazon_predictions)
+
+kaggle_submission_amazon <- amazon_results %>%
+  select(id, .pred_1) %>% #change ".pred_class" to ".pred_1" if using "prob" instead of "class"
+  rename(ACTION=.pred_1) %>%
+  #rename(ACTION=.pred_class)%>%
+  mutate(ACTION=as.numeric(format(ACTION))) 
+
+
+vroom_write(x=kaggle_submission_amazon, file="./PenalizedLogReg2.csv", delim=",")
+
+
+
+## Random Forests 
+
+amazonTrain <- amazonTrain %>%
+  mutate(ACTION = factor(ACTION, levels = c(0, 1)))
+
+# Recipe
+# my_recipe <- recipe(ACTION ~ ., data = amazonTrain) %>%
+#   step_string2factor(all_nominal_predictors()) %>%   # Converts character → factor
+#   step_other(all_nominal_predictors(), threshold = 0.01) %>%  # Handle rare levels
+#   step_lencode_mixed(all_nominal_predictors(), outcome = "ACTION") %>% # Encode factors
+#   step_zv(all_predictors()) %>%                      # Remove zero-variance vars
+#   step_normalize(all_numeric_predictors()) %>%       # Scale numeric vars
+#   step_smote(ACTION, neighbors = 5)                  # Balance classes
+
+
+my_recipe <- recipe(ACTION ~ ., data = amazonTrain) %>%
+  step_string2factor(all_nominal_predictors()) %>%
+  step_other(all_nominal_predictors(), threshold = 0.005) %>%
+  step_lencode_mixed(all_nominal_predictors(), outcome = "ACTION") %>%
+  step_zv(all_predictors()) %>%
+  step_corr(all_numeric_predictors(), threshold = 0.9) %>%  # Remove redundant vars
+  step_normalize(all_numeric_predictors())                  # Stabilize numeric splits
+
+
+my_mod <- rand_forest(mtry = tune(),
+                      min_n=tune(),
+                      trees=1000) %>%
+  set_engine("ranger") %>%
+  set_mode("classification")
+
+## Create a workflow with model & recipe
+amazon_workflow <- workflow() %>%
+  add_recipe(my_recipe) %>%
+  add_model(my_mod)
+
+## Set up grid of tuning values
+# tuning_grid <- grid_regular(mtry(range=c(1, 9)),
+#                                       min_n(range = c(1, 9)), 
+#                                       levels = 5) 
+tuning_grid <- grid_random(
+  mtry(range = c(3, 15)),
+  min_n(range = c(1, 15)),
+  size = 50
+)
+
+
+## Set up K-fold CV
+folds <- vfold_cv(amazonTrain, v = 10, repeats=1)
+
+CV_results <- amazon_workflow %>%
+  tune_grid(resamples=folds,
+            grid=tuning_grid,
+            metrics=metric_set(roc_auc, accuracy)) #Or leave metrics NULL
+
+## Find best tuning parameters
+bestTune <- tune::select_best(CV_results, metric = "roc_auc")
+
+## Finalize workflow and predict
+final_wf <-
+  amazon_workflow %>%
+  finalize_workflow(bestTune) %>%
+  fit(data=amazonTrain)
+
+
+amazon_predictions <- final_wf %>%
+  predict(new_data = amazonTest, type="prob")
+
+amazon_results <- amazonTest %>%
+  bind_cols(amazon_predictions)
+
+kaggle_submission_amazon <- amazon_results %>%
+  select(id, .pred_1) %>% #change ".pred_class" to ".pred_1" if using "prob" instead of "class"
+  rename(ACTION=.pred_1) %>%
+  #rename(ACTION=.pred_class)%>%
+  mutate(ACTION=as.numeric(format(ACTION))) 
+
+
+vroom_write(x=kaggle_submission_amazon, file="./RandomForests1.csv", delim=",")
+
+## Random Forest Final
+
+library(tidymodels)
+library(tidyverse)
+library(vroom)
+library(embed)
+library(kknn)
+library(doParallel)
+library(future)
+library(doFuture)
+
+amazonTrain <- vroom("~/Downloads/AmazonEmployeeAccess/amazon-employee-access-challenge/train.csv") %>%
+  mutate(ACTION = as.factor(ACTION))
+
+my_recipe <- recipe(ACTION~., data = amazonTrain) %>% 
+  step_mutate_at(all_predictors(), fn = factor) %>%
+  step_lencode_mixed(all_nominal_predictors(), outcome = vars(ACTION)) %>%
+  step_normalize(all_numeric_predictors())
+
+n_physical_cores <- parallel::detectCores(logical = FALSE)
+
+plan(multisession, workers = n_physical_cores-1)
+registerDoFuture()
+set.seed(123)
+
+# Model
+my_mod <- rand_forest(mtry = tune(), 
+                      min_n = tune(), 
+                      trees = 100) %>%
+  set_engine("ranger") %>%
+  set_mode("classification")
+
+# Workflow
+forest_wf <- workflow() %>%
+  add_recipe(my_recipe) %>%
+  add_model(my_mod)
+
+# Set up tuning grid
+library(dials)
+mtry_range <- mtry(range = c(1, 9))
+
+forest_grid <- grid_regular(mtry_range, 
+                            min_n(), 
+                            levels = 5)
+
+# Set up k-fold CV
+folds <- vfold_cv(amazonTrain, v = 5, repeats = 1)
+tuned_results <- tune_grid(
+  forest_wf, 
+  resamples = folds, 
+  grid = forest_grid, 
+  metrics = metric_set(roc_auc))
+
+# Best tuning parameters
+best_params <- select_best(tuned_results, metric = "roc_auc")
+
+# Finalize and Predict
+final_wf <- finalize_workflow(
+  forest_wf, 
+  best_params)
+
+final_model <- fit(final_wf, data = amazonTrain)
+
+forest_preds <- predict(final_model, new_data = amazonTest, type = "prob")
+
+# Prepare for Kaggle
+kaggle_submission <- forest_preds %>%
+  bind_cols(., amazonTest) %>%
+  select(id, .pred_1) %>%
+  rename(ACTION = .pred_1)
+
+vroom_write(x=kaggle_submission, file = "./RandomForestAmazon.csv", delim = ",")
+
+
+
+
+
+
+
+
+## KNN
+
+library(tidymodels)
+library(kknn)
+
+amazonTrain$ACTION <- factor(amazonTrain$ACTION, levels = c(0, 1))
+
+my_recipe <- recipe(ACTION ~ ., data = amazonTrain) %>%
+  step_mutate(across(where(is.character), as.factor)) %>%  # convert characters to factors
+  step_other(all_nominal_predictors(), threshold = 0.001) %>%  # collapse rare levels
+  step_dummy(all_nominal_predictors()) %>%  # convert factors to numeric dummies
+  step_normalize(all_numeric_predictors())  # normalize all numeric predictors
+
+
+## knn model
+knn_model <- nearest_neighbor(neighbors=tune()) %>% # set or tune
+  set_mode("classification") %>%
+  set_engine("kknn")
+
+
+##workflow
+knn_wf <- workflow() %>%
+  add_recipe(my_recipe) %>%
+  add_model(knn_model)
+
+## Fit or Tune Model HERE
+
+## Set up grid of tuning values
+tuning_grid <- grid_regular(neighbors(), levels = 10) 
+
+## Set up K-fold CV
+folds <- vfold_cv(amazonTrain, v = 6, repeats=1)
+
+CV_results <- knn_wf %>%
+  tune_grid(resamples=folds,
+            grid=tuning_grid,
+            metrics=metric_set(roc_auc)) #Or leave metrics NULL
+
+## Find best tuning parameters
+bestTune <- tune::select_best(CV_results, metric = "roc_auc")
+
+## Predict
+# Finalize workflow with best K
+final_knn <- finalize_workflow(knn_wf, bestTune)
+
+# Fit on the full training set
+final_fit <- final_knn %>%
+  fit(data = amazonTrain)
+
+# Predict on test set
+amazon_predictions <- final_fit %>%
+  predict(new_data = amazonTest, type = "class")
 
 amazon_results <- amazonTest %>%
   bind_cols(amazon_predictions)
@@ -89,4 +385,239 @@ kaggle_submission_amazon <- amazon_results %>%
   mutate(ACTION=as.numeric(format(ACTION))) 
 
 
-vroom_write(x=kaggle_submission_amazon, file="./PenalizedLogReg1.csv", delim=",")
+vroom_write(x=kaggle_submission_amazon, file="./KNN1.csv", delim=",")
+
+
+
+##Naive Bayes 
+
+library(tidymodels)
+library(discrim)
+library(naivebayes)
+
+my_recipe <- recipe(ACTION ~ ., data = amazonTrain) %>%
+  step_mutate(across(everything(), as.factor)) %>%
+  #step_other(all_nominal_predictors(), threshold = 0.001) %>%
+  step_lencode_mixed(all_nominal_predictors(), outcome = "ACTION") %>%
+  step_normalize(all_numeric_predictors()) 
+#step_range(all_numeric_predictors(), min=0, max=1) %>% #scale to [0,1] 
+#step_pca(all_predictors(), threshold=0.8) #Threshold is between 0 and 1
+
+
+## nb model
+nb_model <- naive_Bayes(Laplace=tune(), smoothness=tune()) %>%
+  set_mode("classification") %>%
+  set_engine("naivebayes") # install discrim library for the naiveb
+
+nb_wf <- workflow() %>%
+  add_recipe(my_recipe) %>%
+  add_model(nb_model)
+
+## Tune smoothness and Laplace here
+tuning_grid <- grid_regular(Laplace(), smoothness(), levels = 5) 
+
+## Set up K-fold CV
+folds <- vfold_cv(amazonTrain, v = 6, repeats=1)
+
+CV_results <- nb_wf %>%
+  tune_grid(resamples=folds,
+            grid=tuning_grid,
+            metrics=metric_set(roc_auc)) #Or leave metrics NULL
+
+## Find best tuning parameters
+bestTune <- tune::select_best(CV_results, metric = "roc_auc")
+
+
+##Finalize wf
+
+final_nbwf <- finalize_workflow(nb_wf, bestTune)
+
+final_fit <- final_nbwf %>%
+  fit(data = amazonTrain)
+
+# Predict on test set
+amazon_predictions <- final_fit %>%
+  predict(new_data = amazonTest, type = "prob")
+
+amazon_results <- amazonTest %>%
+  bind_cols(amazon_predictions)
+
+kaggle_submission_amazon <- amazon_results %>%
+  select(id, .pred_1) %>% #change ".pred_class" to ".pred_1" if using "prob" instead of "class"
+  rename(ACTION=.pred_1) %>% 
+  #rename(ACTION=.pred_class)%>%
+  mutate(ACTION=as.numeric(format(ACTION))) 
+
+
+vroom_write(x=kaggle_submission_amazon, file="./NaiveBayes.csv", delim=",")
+
+
+
+## Multi-Layer Perceptron
+
+my_recipe <- recipe(ACTION ~ ., data = amazonTrain) %>%
+  step_mutate(across(everything(), as.factor)) %>%
+  step_other(all_nominal_predictors(), threshold = 0.001) %>%
+  step_lencode_mixed(all_nominal_predictors(), outcome = "ACTION") %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_range(all_numeric_predictors(), min=0, max=1) #scale to [0,1]
+
+nn_model <- mlp(hidden_units = tune(),
+                epochs = 50 #or 100 or 250
+) %>%
+  set_engine("keras") %>% #verbose = 0 prints off less
+  set_mode("classification")
+
+nn_wf <- workflow() %>%
+  add_recipe(my_recipe) %>%
+  add_model(nn_model)
+
+
+nn_tuneGrid <- grid_regular(hidden_units(range=c(1, 20)),
+                            levels=4)
+
+tuned_nn <- nn_wf %>%
+  tune_grid(resamples = folds,
+            grid = nn_tuneGrid,
+            metrics = metric_set(accuracy))
+
+tuned_nn %>% collect_metrics() %>%
+  filter(.metric=="accuracy") %>%
+  ggplot(aes(x=hidden_units, y=mean)) + geom_line()
+
+## CV tune, finalize and predict here and save results
+folds <- vfold_cv(amazonTrain, v = 6, repeats=1)
+
+CV_results <- nn_wf %>%
+  tune_grid(resamples=folds,
+            grid=nn_tuneGrid,
+            metrics=metric_set(accuracy)) #Or leave metrics NULL
+
+## Find best tuning parameters
+bestTune <- tune::select_best(CV_results, metric = "accuracy")
+
+
+##Finalize wf
+final_nnwf <- finalize_workflow(nn_wf, bestTune)
+
+final_fit <- final_nnwf %>%
+  fit(data = amazonTrain)
+
+# Predict on test set
+amazon_predictions <- final_fit %>%
+  predict(new_data = amazonTest, type = "prob")
+
+amazon_results <- amazonTest %>%
+  bind_cols(amazon_predictions)
+
+kaggle_submission_amazon <- amazon_results %>%
+  select(id, .pred_1) %>% #change ".pred_class" to ".pred_1" if using "prob" instead of "class"
+  rename(ACTION=.pred_1) %>% 
+  #rename(ACTION=.pred_class)%>%
+  mutate(ACTION=as.numeric(format(ACTION))) 
+
+
+vroom_write(x=kaggle_submission_amazon, file="./MLP.csv", delim=",")
+
+
+
+
+## SVMs
+
+library(tidymodels)
+
+amazonTrain <- amazonTrain %>%
+  mutate(ACTION = factor(ACTION, levels = c(0, 1)))
+
+my_recipe <- recipe(ACTION ~ ., data = amazonTrain) %>%
+  step_mutate_at(all_numeric_predictors(), fn = factor) %>%
+  step_lencode_mixed(all_nominal_predictors(), outcome = vars(ACTION)) %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_zv(all_predictors()) %>%
+  step_pca(all_predictors(), threshold=0.99) %>%
+  step_downsample(ACTION)
+
+# my_recipe <- recipe(ACTION ~ ., data = amazonTrain) %>%
+#   step_string2factor(all_nominal_predictors()) %>%
+#   step_other(all_nominal_predictors(), threshold = 0.001) %>%
+#   step_lencode_mixed(all_nominal_predictors(), outcome = "ACTION") %>%
+#   step_normalize(all_numeric_predictors()) %>%
+#   step_range(all_numeric_predictors(), min = 0, max = 1) %>%
+#   step_pca(all_numeric_predictors(), threshold = 0.7)
+
+prep_recipe <- prep(my_recipe, training = amazonTrain)
+baked_data <- bake(prep_recipe, new_data = amazonTest)
+
+## SVM models
+# svmPoly <- svm_poly(degree=tune(), cost=tune()) %>% # set or tune
+# set_mode("classification") %>%
+# set_engine("kernlab")
+
+# svmRBF <- svm_rbf(rbf_sigma = 0.177, cost = 0.00316) %>%
+#   set_mode("classification") %>%
+#   set_engine("kernlab")
+
+svmLinear <- svm_linear(cost = 0.0131) %>%
+  set_mode("classification") %>%
+  set_engine("kernlab")
+
+## Fit or Tune Model HERE
+svm_wf <- workflow() %>%
+  add_recipe(my_recipe) %>%
+  add_model(svmLinear)
+
+## Tune smoothness and Laplace here
+#tuning_grid <- grid_regular(degree(), cost(), levels = 5) 
+
+## Set up K-fold CV
+folds <- vfold_cv(amazonTrain, v = 4, repeats=1)
+
+CV_results <- fit_resamples(
+  svm_wf,
+  resamples = folds,
+  metrics = metric_set(roc_auc)
+)
+
+
+bestTune <- tune::select_best(CV_results, metric = "roc_auc")
+
+
+##Finalize wf
+final_svmwf <- finalize_workflow(svm_wf, bestTune)
+
+final_fit <- final_svmwf %>%
+  fit(data = amazonTrain)
+
+
+# Predict on test set
+amazon_predictions <- final_fit %>%
+  predict(new_data = amazonTest, type = "prob")
+
+amazon_results <- amazonTest %>%
+  bind_cols(amazon_predictions)
+
+kaggle_submission_amazon <- amazon_results %>%
+  select(id, .pred_1) %>% #change ".pred_class" to ".pred_1" if using "prob" instead of "class"
+  rename(ACTION=.pred_1) %>% 
+  mutate(ACTION=as.numeric(format(ACTION))) 
+
+vroom_write(x=kaggle_submission_amazon, file="./SVMlinear.csv", delim=",")
+
+
+
+## SMOTE
+
+library(tidymodels)
+library(themis) # for smote
+
+my_recipe <- recipe(ACTION ~ ., data = amazonTrain) %>%
+  step_mutate_at(all_numeric_predictors(), fn = factor) %>%
+  step_lencode_mixed(all_nominal_predictors(), outcome = vars(ACTION)) %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_zv(all_predictors()) %>%
+  step_pca(all_predictors(), threshold=0.99) %>%
+  step_downsample(ACTION) %>%
+  step_smote(all_outcomes(), neighbors=4)
+
+
+
